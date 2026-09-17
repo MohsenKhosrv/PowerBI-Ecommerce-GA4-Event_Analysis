@@ -1,0 +1,89 @@
+# Methodology
+
+This document covers the analytical decisions behind this project, 
+not just what was built, but why.
+
+## Choosing the dataset
+
+The goal was public, high-volume, single-business user engagement data. 
+GA4's BigQuery sample export from the Google Merchandise Store fit this 
+directly, official Google data, event-level granularity, and large 
+enough volume (several million events across 3 months) to support 
+genuine trend and cohort analysis.
+
+## Defining the fact table
+
+The dataset initially looks like it could support multiple fact tables, 
+device, traffic, and ecommerce data all carry measures. But none of 
+these have an independent grain, they only exist as attributes of a 
+specific event. The test applied: does this entity have its own natural 
+key and exist independently of a triggering event? Device, traffic, and 
+geo failed that test and became dimensions. `items` passed it, since 
+one event can contain multiple items, giving it a finer grain than the 
+event table itself, so it became a second fact table.
+
+## Surrogate keys for dimensions
+
+Device, traffic, and geo have no natural identifiers in the GA4 export. 
+Surrogate keys were generated as MD5 hashes of each dimension's 
+attribute combination (e.g., device category + OS + browser), computed 
+identically in both the fact table and the dimension table's SQL, so 
+the values align for relationship building in Power BI.
+
+## Deriving sessions
+
+GA4 exports events only, there is no native session table. Session-level 
+metrics (duration, event count, bounce flag) were built by aggregating 
+events on `user_pseudo_id` + `ga_session_id`, extracted from the nested 
+`event_params` array. A session's duration is measured as the time 
+between its first and last recorded event, not a true "session close" 
+signal, meaning single-event sessions register as zero-duration by 
+construction. This is a known limitation of deriving duration this way, 
+not a data error.
+
+## Dropping repeat-purchase analysis
+
+An early design question was: how many sessions occur between a user's 
+purchases? A volume check showed fewer than 20% of purchasing users 
+make more than one purchase within the 3-month window, too sparse a 
+base for a reliable repeat-purchase metric. This was replaced with a 
+purchase funnel (view → cart → checkout → purchase) as a more robust 
+way to study conversion behavior with the available data.
+
+A related metric, average sessions per purchase, was built instead: 
+for each purchasing user, total sessions up to their last purchase 
+divided by their total purchase count. Unlike a gap-between-purchases 
+metric, this returns a value for every purchasing user, including 
+one-time buyers, since it measures sessions-to-conversion rather than 
+a repeat-purchase cadence.
+
+## Funnel definition
+
+The purchase funnel includes `view_item`, `add_to_cart`, `begin_checkout`, 
+`add_shipping_info`, `add_payment_info`, and `purchase`. This mirrors 
+GA4's own ecommerce event structure rather than an arbitrary set of 
+milestones, so drop-off at each step reflects an actual step in the 
+site's checkout flow. A parallel item-level funnel was also built, 
+tracking unit quantities (not sessions) through the same stages, since 
+session-based and unit-based funnels can diverge, for example, a few 
+users adding many units of one item will move the item funnel 
+differently than the session funnel, which counts users only once 
+regardless of quantity.
+
+## New vs. returning users
+
+Defined using GA4's `ga_session_number` parameter: a session with 
+`session_number = 1` is a user's first-ever session (new), anything 
+greater is returning. This was chosen over a "first appearance that 
+day" definition since it reflects genuine lifetime user status rather 
+than daily novelty.
+
+## Known limitations
+
+- Session duration is bounded by GA4's tracked event timestamps, not a 
+  true session-close event, so very short (single-event) sessions show 
+  zero duration
+- `user_properties` was checked and found to be essentially unpopulated 
+  in this sample dataset, and was excluded from the model
+- The dataset's three-month window limits longer-term cohort or 
+  seasonality analysis
